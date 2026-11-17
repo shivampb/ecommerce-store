@@ -597,6 +597,7 @@ class RunwaySection extends HTMLElement {
     this.cardToPicker = new Map();
     this.openSheetPicker = null;
     this.sheetHost = null;
+    this.lookMasks = new Array(this.n).fill(null);
 
     this.cursor = {
       active: false,
@@ -864,7 +865,7 @@ class RunwaySection extends HTMLElement {
           const nw = probe.naturalWidth;
           const nh = probe.naturalHeight;
           if (!nw || !nh) return;
-          const w = Math.min(48, nw);
+          const w = Math.min(64, nw);
           const h = Math.max(1, Math.round((nh / nw) * w));
           const canvas = document.createElement('canvas');
           canvas.width = w;
@@ -873,16 +874,45 @@ class RunwaySection extends HTMLElement {
           if (!ctx) return;
           ctx.drawImage(probe, 0, 0, w, h);
           const data = ctx.getImageData(0, 0, w, h).data;
-          let lastOpaqueRow = h - 1;
-          outer: for (let y = h - 1; y >= 0; y--) {
-            const rowStart = y * w * 4;
+          const alpha = new Uint8Array(w * h);
+          let minX = w;
+          let maxX = -1;
+          let minY = h;
+          let maxY = -1;
+
+          for (let y = 0; y < h; y++) {
+            const rowOffset = y * w;
             for (let x = 0; x < w; x++) {
-              if (data[rowStart + x * 4 + 3] > 12) {
-                lastOpaqueRow = y;
-                break outer;
+              const a = data[(rowOffset + x) * 4 + 3];
+              alpha[rowOffset + x] = a;
+              if (a > 12) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
               }
             }
           }
+
+          this.lookMasks[idx] = { w, h, alpha };
+
+          if (maxX >= minX && maxY >= minY) {
+            const hitL = `${clamp((minX / w) * 100 - 1.5, 10, 36).toFixed(1)}%`;
+            const hitR = `${clamp(((w - 1 - maxX) / w) * 100 - 1.5, 10, 36).toFixed(1)}%`;
+            const hitT = `${clamp((minY / h) * 100 - 1, 0, 22).toFixed(1)}%`;
+            hero.style.setProperty('--rw-hit-l', hitL);
+            hero.style.setProperty('--rw-hit-r', hitR);
+            hero.style.setProperty('--rw-hit-t', hitT);
+            this.bodies.forEach((b) => {
+              if (b.index === idx) {
+                b.el.style.setProperty('--rw-hit-l', hitL);
+                b.el.style.setProperty('--rw-hit-r', hitR);
+                b.el.style.setProperty('--rw-hit-t', hitT);
+              }
+            });
+          }
+
+          const lastOpaqueRow = maxY >= 0 ? maxY : h - 1;
           const footPad = Math.max(0, (h - 1 - lastOpaqueRow) / h);
           if (footPad > 0.002 && footPad < 0.25) {
             const val = footPad.toFixed(4);
@@ -897,6 +927,84 @@ class RunwaySection extends HTMLElement {
       };
       probe.src = probeSrc;
     });
+  }
+
+  isPointOpaqueOnFigure(figEl, lookIdx, clientX, clientY, radiusPx = 4) {
+    if (!figEl) return false;
+    const imgEl = figEl.querySelector('img') || figEl;
+    const rect = imgEl.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    if (
+      clientX < rect.left - radiusPx ||
+      clientX > rect.right + radiusPx ||
+      clientY < rect.top - radiusPx ||
+      clientY > rect.bottom + radiusPx
+    ) {
+      return false;
+    }
+
+    const u = (clientX - rect.left) / rect.width;
+    const v = (clientY - rect.top) / rect.height;
+    const mask = this.lookMasks[lookIdx];
+    if (!mask) {
+      return u >= 0.24 && u <= 0.76 && v >= 0.04 && v <= 1;
+    }
+
+    const cx = Math.floor(u * mask.w);
+    const cy = Math.floor(v * mask.h);
+    const rx = Math.max(0, Math.ceil((radiusPx / rect.width) * mask.w));
+    const ry = Math.max(0, Math.ceil((radiusPx / rect.height) * mask.h));
+    const x0 = Math.max(0, cx - rx);
+    const x1 = Math.min(mask.w - 1, cx + rx);
+    const y0 = Math.max(0, cy - ry);
+    const y1 = Math.min(mask.h - 1, cy + ry);
+
+    for (let y = y0; y <= y1; y++) {
+      const row = y * mask.w;
+      for (let x = x0; x <= x1; x++) {
+        if (mask.alpha[row + x] > 18) return true;
+      }
+    }
+    return false;
+  }
+
+  resolveStageHit(clientX, clientY) {
+    const centerFig = this.still
+      ? this.heroes[this.index]?.querySelector('.rw__figure')
+      : this.bodies.find((b) => this.bodyRank(b) === 0)?.el.querySelector('.rw__figure');
+
+    if (centerFig && this.isPointOpaqueOnFigure(centerFig, this.index, clientX, clientY, 2)) {
+      return { type: 'center' };
+    }
+
+    const visibleSideBodies = this.bodies
+      .filter((b) => {
+        if (b.lastHidden) return false;
+        if (Number(b.lastOpacity || 0) < 0.4) return false;
+        const k = this.bodyRank(b);
+        return k !== 0 && Math.abs(k) < 6;
+      })
+      .sort((a, b) => Number(b.lastZ || 0) - Number(a.lastZ || 0));
+
+    for (const b of visibleSideBodies) {
+      const fig = b.el.querySelector('.rw__figure');
+      if (this.isPointOpaqueOnFigure(fig, b.index, clientX, clientY, 12)) {
+        return { type: 'model', k: this.bodyRank(b), body: b };
+      }
+    }
+
+    if (centerFig && this.isPointOpaqueOnFigure(centerFig, this.index, clientX, clientY, 12)) {
+      return { type: 'center' };
+    }
+
+    for (const b of visibleSideBodies) {
+      const fig = b.el.querySelector('.rw__figure');
+      if (this.isPointOpaqueOnFigure(fig, b.index, clientX, clientY, 22)) {
+        return { type: 'model', k: this.bodyRank(b), body: b };
+      }
+    }
+
+    return null;
   }
 
   initSpringStart() {
@@ -1107,10 +1215,46 @@ class RunwaySection extends HTMLElement {
       return;
     }
 
-    const zoomTrigger = t.closest('[data-rw-zoom]');
-    if (zoomTrigger) {
+    const viewBtn = t.closest('.rw__view-btn');
+    if (viewBtn) {
       e.preventDefault();
       this.openZoom();
+      return;
+    }
+
+    const zoomTrigger = t.closest('[data-rw-zoom]');
+    const goBtn = t.closest('[data-rw-go]');
+    if (zoomTrigger || goBtn || t.closest('.rw__model')) {
+      e.preventDefault();
+      const hasPointerCoords = e.detail > 0 || e.clientX !== 0 || e.clientY !== 0;
+      if (hasPointerCoords) {
+        const hit = this.resolveStageHit(e.clientX, e.clientY);
+        if (hit?.type === 'model') {
+          this.moveTo(Math.round(this.target) + hit.k);
+        } else if (hit?.type === 'center') {
+          this.openZoom();
+        }
+        return;
+      }
+
+      if (zoomTrigger) {
+        this.openZoom();
+        return;
+      }
+
+      if (goBtn) {
+        const bodyEl = goBtn.closest('[data-rw-model]');
+        const body = this.bodies.find((b) => b.el === bodyEl);
+        if (body) {
+          const k = this.bodyRank(body);
+          if (k === 0) {
+            this.openZoom();
+          } else if (Math.abs(k) < 6) {
+            this.moveTo(Math.round(this.target) + k);
+          }
+        }
+        return;
+      }
       return;
     }
 
@@ -1148,22 +1292,6 @@ class RunwaySection extends HTMLElement {
       e.preventDefault();
       this.engage();
       this.hot(Number(pinBtn.dataset.rwPin), true);
-      return;
-    }
-
-    const goBtn = t.closest('[data-rw-go]');
-    if (goBtn) {
-      e.preventDefault();
-      const bodyEl = goBtn.closest('[data-rw-model]');
-      const body = this.bodies.find((b) => b.el === bodyEl);
-      if (body) {
-        const k = this.bodyRank(body);
-        if (k === 0) {
-          this.openZoom();
-        } else if (Math.abs(k) < 6) {
-          this.moveTo(Math.round(this.target) + k);
-        }
-      }
       return;
     }
 
@@ -1234,8 +1362,15 @@ class RunwaySection extends HTMLElement {
       }
 
       const el = e.target instanceof Element ? e.target : null;
-      const isZoom = Boolean(!isDrag && el && el.closest('[data-rw-zoom]') && el.closest('.rw__hero.is-on'));
-      const isLink = Boolean(!isDrag && !isZoom && el && el.closest('[data-rw-pin], [data-rw-go]'));
+      let isZoom = false;
+      let isLink = false;
+      if (!isDrag && el && !el.closest('.rw__view-btn, [data-rw-pin]')) {
+        const hit = this.resolveStageHit(e.clientX, e.clientY);
+        isZoom = Boolean(this.still && hit?.type === 'center');
+        isLink = Boolean(!isZoom && hit?.type === 'model');
+      } else if (!isDrag && el && el.closest('[data-rw-pin]')) {
+        isLink = true;
+      }
       if (isZoom !== this.cursor.view) {
         this.cursor.view = isZoom;
         this.cursorEl.classList.toggle('is-view', isZoom);

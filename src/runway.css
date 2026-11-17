@@ -482,7 +482,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .rw__hit {
   position: absolute;
-  inset: 0;
+  top: var(--rw-hit-t, 4%);
+  right: var(--rw-hit-r, 20%);
+  bottom: 0;
+  left: var(--rw-hit-l, 20%);
   z-index: 1;
   background: transparent;
   border: 0;
@@ -527,7 +530,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .rw__zoom {
   position: absolute;
-  inset: 0;
+  top: var(--rw-hit-t, 4%);
+  right: var(--rw-hit-r, 22%);
+  bottom: 0;
+  left: var(--rw-hit-l, 22%);
   z-index: 1;
   background: transparent;
   border: 0;
